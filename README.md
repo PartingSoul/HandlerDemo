@@ -17,7 +17,7 @@ Handler主要用于线程之前的通信问题。
 ```java
  private Handler mHandler = new Handler() {
         @Override
-        public void dispatchMessage(@NonNull Message msg) {
+        public void handleMessage(@NonNull Message msg) {
             //收到消息后的操作
 
             switch (msg.what) {
@@ -257,11 +257,11 @@ public class Handler {
 
 #### 3.3 MessageQueue
 
-消息队列中的Message其实是以链表的方式按消息执行的延迟时间从小到大存储的，表头的延迟执行时间最小。
+消息队列中的Message其实是以链表的方式按消息执行的时间点从小到大存储的，表头的执行时间点最小，也就是最先处理
 
 消息入队：enqueueMessage
 
-- 若队列中不存在消息，或者新入队的消息延迟时间比表头小，则要创建消息表头
+- 若队列中不存在消息，或者新入队的消息执行时间点比表头小，则要创建消息表头
 - 存在表头的情况下，将消息插入到有序链表中
 
 ```java
@@ -291,7 +291,7 @@ boolean enqueueMessage(Message msg, long when) {
     // 是否需要唤醒
     boolean needWake;
     if (p == null || when == 0 || when < p.when) {
-      // 消息队列中不存在消息的情况下或者消息延迟时间比表头小，创建表头
+      // 消息队列中不存在消息的情况下或者消息执行时间点比表头小，创建表头
       msg.next = p;
       mMessages = msg;
       // 唤醒阻塞
@@ -300,14 +300,14 @@ boolean enqueueMessage(Message msg, long when) {
       // 如果是处于阻塞状态且消息为异步消息，消息头为屏障，则需要唤醒阻塞
       needWake = mBlocked && p.target == null && msg.isAsynchronous();
       Message prev;
-      //链表是根据延迟时间从小到大排列的，表头的延迟时间最小
+      //链表是根据消息执行时间点从小到大排列的
       for (;;) {
         prev = p;
         p = p.next;
         if (p == null || when < p.when) {
           break;
         }
-        // 若异步消息未到达执行时间，不需要唤醒
+        // 若异步消息未到达执行时间点，不需要唤醒
         if (needWake && p.isAsynchronous()) {
           needWake = false;
         }
@@ -409,5 +409,289 @@ Message next() {
 
 ThreadLocal简单的讲是一个用于存储线程作用域局部变量的类
 
+这边用一个简单的例子来说明
+
+- 创建一个ThreadLocal成员属性，在主线程使用set设置值，然后在子线程中通过get方法去取出值
+- 在子线程中通过set方法去设置值，然后在主线程中调用get方法去获取值
+
+```java
+ThreadLocal<String> threadLocal = new ThreadLocal<>();
+private void threadLocal() {
+  threadLocal.set("这边是主线程的数据");
+
+  new Thread(new Runnable() {
+    @Override
+    public void run() {
+      String msg = threadLocal.get();
+      Log.e(TAG, "threadLocal " + Thread.currentThread() + " msg = " + msg);
+      threadLocal.set("子线程中的数据");
+    }
+  }).start();
 
 
+  mHandler.post(new Runnable() {
+    @Override
+    public void run() {
+      String msg = threadLocal.get();
+      Log.e(TAG, "threadLocal " + Thread.currentThread() + " msg = " + msg);
+    }
+  });
+}
+```
+
+执行结果
+
+> E/Handler==>>: threadLocal Thread[Thread-3,5,main] msg = null
+>
+> E/Handler==>>: threadLocal Thread[main,5,main] msg = 这边是主线程的数据
+
+可以看到在主线程通过set方法在ThreadLocal设置值后，在子线程中取出的值确是null；同样在子线程中通过set方法给ThreadLocal设置值，在主线程中取出，发现取出的值并没有发生改变，这就是ThreadLocal变量的线程作用域，也就是说存储的变量只在当前线程内有效，该变量对其他线程来说是不可见的。
+
+我们来分析一下它的实现原理，首先通过set方法来设置变量
+
+- 存在一个线程与变量的map，存储变量时，首先根据线程获取对应的ThreadLocalMap，若存在则更新map的值
+- 若ThreadLocalMap不存在，则创建对应ThreadLocalMap，把值放入Map中
+
+```java
+public void set(T value) {
+  Thread t = Thread.currentThread();
+  ThreadLocalMap map = getMap(t);
+  if (map != null)
+    map.set(this, value);
+  else
+    createMap(t, value);
+}
+```
+
+我们来看看getMap和createMap这两个方法，不难发现两个方法其实都是去操作了Thread的一个成员属性，也就是说无论在哪个线程中去调用ThreadLocalMap的set方法，最终还是将值存储在了对应线程的ThreadMap中，不同的线程有着不同的ThreadLocalMap实例。
+
+```java
+ThreadLocalMap getMap(Thread t) {
+  return t.threadLocals;
+}
+
+void createMap(Thread t, T firstValue) {
+  t.threadLocals = new ThreadLocalMap(this, firstValue);
+}
+```
+
+同理，看下ThreadLocal的get方法
+
+- 拿到调用当前方法的线程信息
+- 从当前线程的成员属性ThreadLocalMap取出属性值，不存在则在Map中插入默认值，并且返回
+
+```java
+public T get() {
+  Thread t = Thread.currentThread();
+  ThreadLocalMap map = getMap(t);
+  if (map != null) {
+    ThreadLocalMap.Entry e = map.getEntry(this);
+    if (e != null) {
+      @SuppressWarnings("unchecked")
+      T result = (T)e.value;
+      return result;
+    }
+  }
+  return setInitialValue();
+}
+```
+
+#### 3.6 Looper
+
+Looper的职责是不断的从消息队列中取出消息，然后将消息进行分发。
+
+- Looper在创建时会自动关联消息队列以及Looper对应的线程
+- loop方法中是一个死循环，会不断的从消息队列中取消息，有消息则将消息分发，最终消息的处理还是交给发送该消息的Handler
+- 若消息队列中不存在可以立刻执行的消息，则会一直处于阻塞状态(next方法)，直到有可执行的消息
+- Looper有两种停止方式：强制停止与安全停止。强制停止会移除消息队列中所有的消息，而安全的停止只会移除消息队列中未到执行时间的消息，达到执行时间或者正在执行的消息还是会继续处理，直到队列中不存在消息，此时停止消息队列，再停止Looper
+
+```java
+public final class Looper {
+    // 线程-Looper Map
+    static final ThreadLocal<Looper> sThreadLocal = new ThreadLocal<Looper>();
+
+    // 主线程对应的Looper
+    private static Looper sMainLooper; 
+
+    final MessageQueue mQueue;
+
+    // 创建Looper的线程
+    final Thread mThread;
+    
+    // quitAllowed表示是否允许停止
+    private Looper(boolean quitAllowed) {
+        // 创建Looper时会创建消息队列，并且与创建Looper的线程关联
+        mQueue = new MessageQueue(quitAllowed);
+        mThread = Thread.currentThread();
+    }
+
+    // 创建当前线程的Looper
+    public static void prepare()
+    private static void prepare(boolean quitAllowed){
+        if (sThreadLocal.get() != null) {
+            throw new RuntimeException("Only one Looper may be created per thread");
+        }
+        sThreadLocal.set(new Looper(quitAllowed));
+    }
+
+    // 创建主线程对应的Looper
+    public static void prepareMainLooper()
+
+    public static void loop() {
+        final Looper me = myLooper();
+        if (me == null) {
+            throw new RuntimeException("No Looper; Looper.prepare() wasn't called on this thread.");
+        }
+        final MessageQueue queue = me.mQueue;
+        ...
+
+        // 死循环
+        for (;;) {
+            // 若消息队列中没有可执行的消息，则会处于阻塞状态
+            Message msg = queue.next(); 
+            if (msg == null) {
+                // 消息队列停止，msg返回null
+                return;
+            }
+
+            ... 
+
+            long origWorkSource = ThreadLocalWorkSource.setUid(msg.workSourceUid);
+            try {
+                //将取出的下次进行分发，target为发送该消息的Handler
+                msg.target.dispatchMessage(msg);
+                if (observer != null) {
+                    observer.messageDispatched(token, msg);
+                }
+                dispatchEnd = needEndTime ? SystemClock.uptimeMillis() : 0;
+            } catch (Exception exception) {
+                if (observer != null) {
+                    observer.dispatchingThrewException(token, msg, exception);
+                }
+                throw exception;
+            } finally {
+                ThreadLocalWorkSource.restore(origWorkSource);
+                if (traceTag != 0) {
+                    Trace.traceEnd(traceTag);
+                }
+            }
+            
+            ...
+            msg.recycleUnchecked();
+        }
+    }
+
+    //直接停止，会移除队列中所有的消息，包括正在使用的消息
+    public void quit() {
+        mQueue.quit(false);
+    }
+
+    // 安全地停止，只未到执行时间点的消息，而达到执行时间点的消息或者正在执行的消息还会执行完
+    public void quitSafely() {
+        mQueue.quit(true);
+    }
+}
+```
+
+这边看下Looper的停止，可以看到，停止Looper，最终还是要先停止消息队列
+
+MessageQueue.java
+
+```java
+void quit(boolean safe) {
+  // 若消息队列不能被停止，此时会抛出异常
+  if (!mQuitAllowed) {
+    throw new IllegalStateException("Main thread not allowed to quit.");
+  }
+
+  synchronized (this) {
+    if (mQuitting) {
+      // 若已设置停止标志位，说明正在停止或者已经停止，直接返回
+      return;
+    }
+    mQuitting = true;
+
+    if (safe) {
+      // 安全的停止
+      removeAllFutureMessagesLocked();
+    } else {
+      // 强制停止
+      removeAllMessagesLocked();
+    }
+
+    // We can assume mPtr != 0 because mQuitting was previously false.
+    nativeWake(mPtr);
+  }
+}
+```
+
+首先看安全的停止
+
+- 若表头执行时间点未到，整个消息队列中的消息都回收
+- 消息队列中正在执行的消息或者已经到达执行时间点的消息还会继续执行
+
+```java
+private void removeAllFutureMessagesLocked() {
+  final long now = SystemClock.uptimeMillis();
+  // 一个按执行时间点从小到大排列的链表
+  Message p = mMessages;
+  if (p != null) {
+    if (p.when > now) {
+      // 表头的执行时间还未到，说明整个链表都是执行时间未到的消息，全部取消
+      removeAllMessagesLocked();
+    } else {
+      // 表头为立刻执行的消息
+      Message n;
+      // 找到第一个未到执行时间点的消息
+      for (;;) {
+        n = p.next;
+        if (n == null) {
+          return;
+        }
+        if (n.when > now) {
+          break;
+        }
+        p = n;
+      }
+      p.next = null;
+      //将所有未到执行时间点的消息全部移除回收
+      do {
+        p = n;
+        n = p.next;
+        p.recycleUnchecked();
+      } while (n != null);
+    }
+  }
+}
+```
+
+从上可知，在安全停止时，消息队列中所有的消息还为达到执行时间，则会调用强制取消的方法
+
+```java
+private void removeAllMessagesLocked() {
+  Message p = mMessages;
+  //遍历整个链表，回收所有的消息
+  while (p != null) {
+    Message n = p.next;
+    p.recycleUnchecked();
+    p = n;
+  }
+  mMessages = null;
+}
+```
+
+#### 3.7 总结
+
+![handler](https://i.postimg.cc/0NpmJzrF/handler.png)
+
+- Handler将消息发送至消息队列，消息在消息队列中按照执行的时间点从小到大且以链表的方式排列
+- Looper用于从消息队列中取出消息和对消息进行分发，loop是一个死循环，它会不断的从消息队列中取出消息，若存在可执行的消息，则将消息分发至Handler进行处理
+- 若消息队列中不存在可以立即执行的消息，则Looper会处于阻塞状态，直到消息队列中存在可立即执行的消息
+
+
+
+参考资料：
+
+- 《Android开发艺术探索》
+
+- [Handler机制——同步屏障](https://blog.csdn.net/start_mao/article/details/98963744)

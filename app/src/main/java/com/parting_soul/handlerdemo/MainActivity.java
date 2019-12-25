@@ -4,6 +4,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.SystemClock;
+import android.util.Log;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -14,8 +15,9 @@ public class MainActivity extends AppCompatActivity {
     private TextView mTv;
 
     private Handler mHandler = new Handler() {
+
         @Override
-        public void dispatchMessage(@NonNull Message msg) {
+        public void handleMessage(@NonNull Message msg) {
             //收到消息后的操作
 
             switch (msg.what) {
@@ -48,6 +50,32 @@ public class MainActivity extends AppCompatActivity {
                 mHandler.sendMessage(message);
             }
         }).start();
+
+        threadLocal();
+    }
+
+
+    ThreadLocal<String> threadLocal = new ThreadLocal<>();
+    private void threadLocal() {
+        threadLocal.set("这边是主线程的数据");
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String msg = threadLocal.get();
+                Log.e(TAG, "threadLocal " + Thread.currentThread() + " msg = " + msg);
+                threadLocal.set("子线程中的数据");
+            }
+        }).start();
+
+
+        mHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                String msg = threadLocal.get();
+                Log.e(TAG, "threadLocal " + Thread.currentThread() + " msg = " + msg);
+            }
+        },2000);
     }
 
 
