@@ -688,10 +688,56 @@ private void removeAllMessagesLocked() {
 - Looper用于从消息队列中取出消息和对消息进行分发，loop是一个死循环，它会不断的从消息队列中取出消息，若存在可执行的消息，则将消息分发至Handler进行处理
 - 若消息队列中不存在可以立即执行的消息，则Looper会处于阻塞状态，直到消息队列中存在可立即执行的消息
 
+### 四. 常见问题
 
+#### 4.1 子线程是否能创建Handler
+
+可以，但是需要为子线程创建Looper，若子线程中不存在对应的Looper，则会抛出异常
+
+```java
+public Handler(@Nullable Callback callback, boolean async) {
+  mLooper = Looper.myLooper();
+  if (mLooper == null) {
+    throw new RuntimeException(
+      "Can't create handler inside thread " + Thread.currentThread()
+      + " that has not called Looper.prepare()");
+  }
+}
+```
+
+此时有人可能有疑问，为什么在主线程创建Handler不需要我们手动创建Looper。其实这个创建Looper的过程Android的Framework已经帮我们实现了。
+
+ActivityThread.java
+
+```java
+public static void main(String[] args) {
+ 	...
+  
+  // 为主线程创建Looper
+  Looper.prepareMainLooper();
+  
+  ActivityThread thread = new ActivityThread();
+  thread.attach(false, startSeq);
+
+  if (sMainThreadHandler == null) {
+    sMainThreadHandler = thread.getHandler();
+  }
+ 	// 启动looper
+  Looper.loop();
+
+  throw new RuntimeException("Main thread loop unexpectedly exited");
+}
+```
+
+#### 4.2 在同一线程中 android.Handler 和 android.MessaegQueue 的数量对应关系 
+
+一个线程只存在一个MessageQueue和Looper，但可以有多个Handler，所以是多对一。
+
+例如Activity的onCreate、onResume()等方法都是通过底层发送的消息而回调的
 
 参考资料：
 
 - 《Android开发艺术探索》
 
-- [Handler机制——同步屏障](https://blog.csdn.net/start_mao/article/details/98963744)
+-   [Handler机制——同步屏障](https://blog.csdn.net/start_mao/article/details/98963744)
+
